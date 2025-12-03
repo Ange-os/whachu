@@ -1,18 +1,18 @@
 {
   "name": "weapi",
   "version": "1.0.0",
+  "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
     "express": "^5.2.1",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
-    "whatsapp-web.js": "^1.34.2"
+    "whatsapp-web.js": "^1.34.2",
+    "puppeteer": "^23.0.0"
   }
 }
+
+
