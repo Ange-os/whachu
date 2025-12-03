@@ -1,0 +1,6 @@
+curl
+.wwebjs_auth
+.wwebjs_cache
+node_modules
+package-lock.json
+session
