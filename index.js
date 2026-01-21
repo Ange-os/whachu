@@ -25,7 +25,7 @@ const client = new Client({
 // EVENTOS DEL CLIENTE
 client.on("qr", (qr) => {
     console.log("QR recibido, escanea para iniciar sesión:");
-    qrcodeTerminal.generate(qr, { small: true }); // muestra el QR en consola
+    qrcodeTerminal.generate(qr, { small: true });
 });
 
 client.on("ready", () => {
@@ -63,12 +63,25 @@ app.post("/send", async (req, res) => {
         }
 
         const chatId = to.includes("@c.us") ? to : `${to}@c.us`;
-        await client.sendMessage(chatId, message);
+
+        // Validar que el número esté registrado
+        const isRegistered = await client.isRegisteredUser(chatId);
+        if (!isRegistered) {
+            return res.status(400).json({ error: "Número no registrado en WhatsApp" });
+        }
+
+        // Enviar mensaje sin marcar como leído
+        await client.sendMessage(chatId, message, { sendSeen: false });
 
         console.log(`Mensaje enviado a ${chatId}: ${message}`);
         res.json({ status: "sent", to: chatId });
     } catch (err) {
         console.error("Error enviando mensaje:", err);
+        try {
+            console.log("Estado actual:", await client.getState());
+        } catch (stateErr) {
+            console.error("No se pudo obtener el estado del cliente:", stateErr);
+        }
         res.status(500).json({ error: "Error enviando mensaje." });
     }
 });
