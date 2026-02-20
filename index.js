@@ -42,11 +42,11 @@ const client = new Client({
 
 let lastReinitFailed = false;
 
-function scheduleReinit() {
+function scheduleReinit(overrideDelayMs) {
     if (isReinitializing) return;
     isReinitializing = true;
     clientReady = false;
-    const delay = lastReinitFailed ? REINIT_DELAY_AFTER_FAIL_MS : REINIT_DELAY_MS;
+    const delay = overrideDelayMs ?? (lastReinitFailed ? REINIT_DELAY_AFTER_FAIL_MS : REINIT_DELAY_MS);
     console.log("⏳ Reintentando inicializar cliente en", delay / 1000, "segundos...");
     if (reinitTimeoutId) clearTimeout(reinitTimeoutId);
     reinitTimeoutId = setTimeout(async () => {
@@ -70,14 +70,20 @@ function scheduleReinit() {
     }, delay);
 }
 
+function isPuppeteerRecoverableError(msg) {
+    return (
+        msg.includes("Execution context was destroyed") ||
+        msg.includes("Protocol error (Network.getResponseBody)") ||
+        msg.includes("ProtocolError") ||
+        msg.includes("Attempted to use detached Frame") ||
+        msg.includes("detached Frame")
+    );
+}
+
 // Errores de Puppeteer/whatsapp-web.js que no deben tumbar el proceso
 process.on("uncaughtException", (err) => {
     const msg = err?.message || String(err);
-    if (
-        msg.includes("Execution context was destroyed") ||
-        msg.includes("Protocol error (Network.getResponseBody)") ||
-        msg.includes("ProtocolError")
-    ) {
+    if (isPuppeteerRecoverableError(msg)) {
         console.error("⚠️ Error interno de Puppeteer/WhatsApp (se reintentará):", msg.slice(0, 120));
         scheduleReinit();
         return;
@@ -87,11 +93,7 @@ process.on("uncaughtException", (err) => {
 
 process.on("unhandledRejection", (reason) => {
     const msg = reason?.message || String(reason);
-    if (
-        msg.includes("Execution context was destroyed") ||
-        msg.includes("Protocol error (Network.getResponseBody)") ||
-        msg.includes("ProtocolError")
-    ) {
+    if (isPuppeteerRecoverableError(msg)) {
         console.error("⚠️ Rechazo no manejado de Puppeteer/WhatsApp (se reintentará):", msg.slice(0, 120));
         scheduleReinit();
         return;
@@ -179,6 +181,24 @@ app.get("/session/clear", (req, res) => {
     );
 });
 
+// Borrar carpeta con reintentos (evita EBUSY cuando el proceso aún tiene archivos abiertos)
+async function rmDirWithRetry(dirPath, maxRetries = 4) {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            await fs.rm(dirPath, { recursive: true, force: true });
+            console.log("Borrada carpeta de sesión:", dirPath);
+            return;
+        } catch (e) {
+            if (e?.code === "ENOENT") return;
+            if (e?.code === "EBUSY" && i < maxRetries - 1) {
+                await new Promise((r) => setTimeout(r, 2000 + i * 2000));
+                continue;
+            }
+            console.error("Error borrando", dirPath, e?.message);
+        }
+    }
+}
+
 // Borrar sesión y forzar nuevo QR (POST desde el formulario o desde API)
 app.post("/session/clear", async (req, res) => {
     const baseDir = process.cwd();
@@ -186,52 +206,60 @@ app.post("/session/clear", async (req, res) => {
         path.join(baseDir, "session"),
         path.join(baseDir, ".wwebjs_auth"),
     ];
-    try {
-        clientReady = false;
-        lastQrDataUrl = null;
-        if (reinitTimeoutId) {
-            clearTimeout(reinitTimeoutId);
-            reinitTimeoutId = null;
-        }
-        isReinitializing = false;
-        try {
-            await Promise.race([
-                client.destroy(),
-                new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 12000)),
-            ]);
-        } catch (_) {}
-        for (const dir of dirsToRemove) {
-            try {
-                await fs.rm(dir, { recursive: true, force: true });
-                console.log("Borrada carpeta de sesión:", dir);
-            } catch (e) {
-                if (e?.code !== "ENOENT") console.error("Error borrando", dir, e?.message);
-            }
-        }
-        await client.initialize();
-        const wantsHtml = req.headers.accept && req.headers.accept.includes("text/html");
+    const wantsHtml = req.headers.accept && req.headers.accept.includes("text/html");
+    const sendOk = (extra) => {
         if (wantsHtml) {
             res.type("html").send(
                 HTML_HEAD +
                 "<h1>Sesión borrada</h1>" +
                 "<p>Espera 1–2 minutos a que se genere el QR y luego abre el enlace:</p>" +
                 "<p><strong><a href=\"/qr\">Ver QR para escanear</a></strong></p>" +
-                "<p><a href=\"/qr\">/qr</a></p>" +
+                (extra ? "<p>" + extra + "</p>" : "") +
                 HTML_FOOT
             );
         } else {
             res.json({ ok: true, message: "Sesión borrada. Abre GET /qr para escanear de nuevo." });
         }
+    };
+
+    if (isReinitializing) {
+        if (wantsHtml) {
+            return res.type("html").status(409).send(
+                HTML_HEAD + "<h1>Espera</h1><p>Ya hay un reinicio en curso. Espera 1 minuto y vuelve a intentar.</p><p><a href=\"/session/clear\">Volver</a></p>" + HTML_FOOT
+            );
+        }
+        return res.status(409).json({ error: "Reinicio en curso; intenta en 1 minuto." });
+    }
+
+    isReinitializing = true;
+    clientReady = false;
+    lastQrDataUrl = null;
+    if (reinitTimeoutId) {
+        clearTimeout(reinitTimeoutId);
+        reinitTimeoutId = null;
+    }
+
+    try {
+        try {
+            await Promise.race([
+                client.destroy(),
+                new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 12000)),
+            ]);
+        } catch (_) {}
+        // Dar tiempo a que el proceso suelte los archivos de session
+        await new Promise((r) => setTimeout(r, 4000));
+        for (const dir of dirsToRemove) {
+            await rmDirWithRetry(dir);
+        }
+        // No llamar initialize() aquí: el frame puede seguir "detached". Programar reinicio en 8 s.
+        isReinitializing = false;
+        scheduleReinit(8000);
+        sendOk();
     } catch (err) {
         console.error("Error en session/clear:", err?.message || err);
-        const wantsHtml = req.headers.accept && req.headers.accept.includes("text/html");
-        if (wantsHtml) {
-            res.type("html").status(500).send(
-                HTML_HEAD + "<h1>Error</h1><p>" + (err?.message || err) + "</p><p><a href=\"/session/clear\">Volver</a></p>" + HTML_FOOT
-            );
-        } else {
-            res.status(500).json({ error: "Error borrando sesión.", detail: err?.message });
-        }
+        isReinitializing = false;
+        scheduleReinit();
+        sendOk("Si no ves el QR en 1–2 min, <strong>reinicia el contenedor</strong> desde Portainer. Se va a reintentar en segundo plano.");
     }
 });
 
