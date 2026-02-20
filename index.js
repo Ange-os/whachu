@@ -48,8 +48,11 @@ client.on("auth_failure", () => {
 });
 
 client.on("disconnected", (reason) => {
-    console.log("❌ Cliente desconectado:", reason);
     clientReady = false;
+    console.log("❌ Cliente desconectado:", reason);
+    if (String(reason).toUpperCase() === "LOGOUT") {
+        console.log("→ Escanea de nuevo el QR (o abre /qr.png) para volver a enlazar.");
+    }
 });
 
 // Evitar que errores de Puppeteer/whatsapp-web.js tiren el proceso
@@ -129,13 +132,25 @@ app.get("/status", (req, res) => {
 app.post("/send", async (req, res) => {
     try {
         if (!clientReady) {
-            return res.status(400).json({ error: "WhatsApp no está listo todavía." });
+            return res.status(503).json({ error: "WhatsApp no está listo. Escanea el QR o espera a que se reconecte." });
         }
 
         const { to, message } = req.body;
 
         if (!to || !message) {
             return res.status(400).json({ error: "Faltan parámetros: to, message" });
+        }
+
+        let state;
+        try {
+            state = await client.getState();
+        } catch (_) {
+            clientReady = false;
+            return res.status(503).json({ error: "Sesión no disponible. Escanea el QR de nuevo." });
+        }
+        if (state !== "CONNECTED") {
+            clientReady = false;
+            return res.status(503).json({ error: "WhatsApp desconectado. Escanea el QR de nuevo." });
         }
 
         const chatId = to.includes("@c.us") ? to : `${to}@c.us`;
@@ -146,6 +161,12 @@ app.post("/send", async (req, res) => {
 
         res.json({ status: "sent", to: chatId });
     } catch (err) {
+        const msg = String(err?.message || err);
+        if (msg.includes("Execution context was destroyed") || msg.includes("ProtocolError") || msg.includes("CONNECTION")) {
+            clientReady = false;
+            console.error("Error enviando (sesión cerrada):", msg.slice(0, 60));
+            return res.status(503).json({ error: "Sesión cerrada. Escanea el QR de nuevo." });
+        }
         console.error("Error enviando mensaje:", err);
         res.status(500).json({ error: "Error enviando mensaje." });
     }
