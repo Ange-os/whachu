@@ -1,8 +1,13 @@
 import express from "express";
+import fs from "fs/promises";
+import path from "path";
+import qrcode from "qrcode";
 import pkg from "whatsapp-web.js";
 import qrcodeTerminal from "qrcode-terminal";
 
 const { Client, LocalAuth } = pkg;
+
+let lastQrDataUrl = null;
 
 const app = express();
 app.use(express.json());
@@ -100,13 +105,19 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // EVENTOS DEL CLIENTE
-client.on("qr", (qr) => {
-    console.log("QR recibido, escanea para iniciar sesión:");
+client.on("qr", async (qr) => {
+    console.log("QR recibido, escanea para iniciar sesión (o abre GET /qr en el navegador):");
     qrcodeTerminal.generate(qr, { small: true });
+    try {
+        lastQrDataUrl = await qrcode.toDataURL(qr, { width: 400, margin: 2 });
+    } catch (_) {
+        lastQrDataUrl = null;
+    }
 });
 
 client.on("ready", () => {
     clientReady = true;
+    lastQrDataUrl = null;
     console.log("✅ WhatsApp listo!");
 });
 
@@ -127,6 +138,64 @@ client.on("disconnected", (reason) => {
 client.initialize();
 
 // --- API ENDPOINTS ---
+
+// Ver el QR en el navegador (útil cuando no ves la consola, ej. en Portainer)
+app.get("/qr", (req, res) => {
+    if (!lastQrDataUrl) {
+        return res.status(404).send(
+            "<html><body><p>No hay QR disponible. Espera a que la app genere uno (puede tardar 1–2 min) y recarga esta página.</p><p><a href='/qr'>Recargar</a></p></body></html>"
+        );
+    }
+    res.type("html").send(
+        `<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="font-family:sans-serif;text-align:center;padding:2rem"><h1>Escanear WhatsApp</h1><p>Escanea con tu teléfono (WhatsApp → Enlazar dispositivo)</p><img src="${lastQrDataUrl}" alt="QR" style="max-width:100%"/><p><a href="/qr">Actualizar QR</a></p></body></html>`
+    );
+});
+
+// Borrar sesión y forzar nuevo QR (sin entrar al contenedor)
+app.post("/session/clear", async (req, res) => {
+    const baseDir = process.cwd();
+    const dirsToRemove = [
+        path.join(baseDir, "session"),
+        path.join(baseDir, ".wwebjs_auth"),
+    ];
+    try {
+        clientReady = false;
+        lastQrDataUrl = null;
+        if (reinitTimeoutId) {
+            clearTimeout(reinitTimeoutId);
+            reinitTimeoutId = null;
+        }
+        isReinitializing = false;
+        try {
+            await Promise.race([
+                client.destroy(),
+                new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 12000)),
+            ]);
+        } catch (_) {}
+        for (const dir of dirsToRemove) {
+            try {
+                await fs.rm(dir, { recursive: true, force: true });
+                console.log("Borrada carpeta de sesión:", dir);
+            } catch (e) {
+                if (e?.code !== "ENOENT") console.error("Error borrando", dir, e?.message);
+            }
+        }
+        await client.initialize();
+        res.json({ ok: true, message: "Sesión borrada. Abre GET /qr para escanear de nuevo." });
+    } catch (err) {
+        console.error("Error en session/clear:", err?.message || err);
+        res.status(500).json({ error: "Error borrando sesión.", detail: err?.message });
+    }
+});
+
+// Si el error indica que la sesión/página se destruyó, marcar no listo y no llamar más al cliente
+function isContextDestroyedError(err) {
+    const msg = err?.message || String(err);
+    return (
+        msg.includes("Execution context was destroyed") ||
+        msg.includes("Protocol error (Runtime.callFunctionOn)")
+    );
+}
 
 // ENVIAR MENSAJE
 app.post("/send", async (req, res) => {
@@ -154,6 +223,15 @@ app.post("/send", async (req, res) => {
         console.log(`Mensaje enviado a ${chatId}: ${message}`);
         res.json({ status: "sent", to: chatId });
     } catch (err) {
+        const contextDestroyed = isContextDestroyedError(err);
+        if (contextDestroyed) {
+            clientReady = false;
+            console.error("Error enviando mensaje (sesión/página invalidada):", err?.message || err);
+            scheduleReinit();
+            return res.status(503).json({
+                error: "Cliente desconectado o sesión no disponible. Se está reconectando; reintenta en unos segundos.",
+            });
+        }
         console.error("Error enviando mensaje:", err);
         try {
             console.log("Estado actual:", await client.getState());
