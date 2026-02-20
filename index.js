@@ -8,6 +8,8 @@ const app = express();
 app.use(express.json());
 
 let clientReady = false;
+let isReinitializing = false;
+const REINIT_DELAY_MS = 8000;
 
 // --- CLIENTE WHATSAPP ---
 const client = new Client({
@@ -18,8 +20,62 @@ const client = new Client({
         args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--single-process",
+            "--no-zygote",
+            "--disable-extensions",
         ],
     },
+});
+
+function scheduleReinit() {
+    if (isReinitializing) return;
+    isReinitializing = true;
+    clientReady = false;
+    console.log("⏳ Reintentando inicializar cliente en", REINIT_DELAY_MS / 1000, "segundos...");
+    setTimeout(async () => {
+        try {
+            try {
+                await client.destroy();
+            } catch (_) {}
+            await client.initialize();
+        } catch (err) {
+            console.error("Error al reinicializar:", err.message);
+        } finally {
+            isReinitializing = false;
+        }
+    }, REINIT_DELAY_MS);
+}
+
+// Errores de Puppeteer/whatsapp-web.js que no deben tumbar el proceso
+process.on("uncaughtException", (err) => {
+    const msg = err?.message || String(err);
+    if (
+        msg.includes("Execution context was destroyed") ||
+        msg.includes("Protocol error (Network.getResponseBody)") ||
+        msg.includes("ProtocolError")
+    ) {
+        console.error("⚠️ Error interno de Puppeteer/WhatsApp (se reintentará):", msg.slice(0, 120));
+        scheduleReinit();
+        return;
+    }
+    console.error("Uncaught exception:", err);
+});
+
+process.on("unhandledRejection", (reason) => {
+    const msg = reason?.message || String(reason);
+    if (
+        msg.includes("Execution context was destroyed") ||
+        msg.includes("Protocol error (Network.getResponseBody)") ||
+        msg.includes("ProtocolError")
+    ) {
+        console.error("⚠️ Rechazo no manejado de Puppeteer/WhatsApp (se reintentará):", msg.slice(0, 120));
+        scheduleReinit();
+        return;
+    }
+    console.error("Unhandled rejection:", reason);
 });
 
 // EVENTOS DEL CLIENTE
@@ -44,6 +100,7 @@ client.on("auth_failure", () => {
 client.on("disconnected", (reason) => {
     console.log("❌ Cliente desconectado:", reason);
     clientReady = false;
+    scheduleReinit();
 });
 
 client.initialize();
