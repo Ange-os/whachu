@@ -1,7 +1,7 @@
 import express from "express";
 import pkg from "whatsapp-web.js";
 import qrcode from "qrcode";
-import fs from "fs";
+import qrcodeTerminal from "qrcode-terminal";
 
 const { Client, LocalAuth } = pkg;
 
@@ -26,7 +26,8 @@ const client = new Client({
 
 // LOGS
 client.on("qr", (qr) => {
-    console.log("QR recibido, escanea para iniciar sesión.");
+    console.log("QR recibido, escanea para iniciar sesión:");
+    qrcodeTerminal.generate(qr, { small: true });
     qrcode.toDataURL(qr, (err, url) => {
         qrCodeData = url;
     });
@@ -57,14 +58,32 @@ function esErrorPuppeteer(msg) {
         msg.includes("Protocol error (Network.getResponseBody)") ||
         msg.includes("No data found for resource") ||
         msg.includes("Execution context was destroyed") ||
-        msg.includes("ProtocolError")
+        msg.includes("ProtocolError") ||
+        msg.includes("auth timeout")
     );
+}
+
+let reinitTimer = null;
+function reintentar() {
+    if (reinitTimer) return;
+    console.log("Reintentando en 20 s...");
+    reinitTimer = setTimeout(async () => {
+        reinitTimer = null;
+        try {
+            await client.destroy().catch(() => {});
+            await new Promise((r) => setTimeout(r, 3000));
+            client.initialize();
+        } catch (e) {
+            console.error("Reintento falló:", e?.message || e);
+        }
+    }, 20000);
 }
 
 process.on("uncaughtException", (err) => {
     const msg = err?.message || String(err);
     if (esErrorPuppeteer(msg)) {
-        console.error("⚠️ Error de Puppeteer (el cliente puede seguir en uso):", msg.slice(0, 80));
+        console.error("⚠️ Error de Puppeteer:", msg.slice(0, 80));
+        if (msg.includes("auth timeout")) reintentar();
         return;
     }
     throw err;
@@ -73,7 +92,8 @@ process.on("uncaughtException", (err) => {
 process.on("unhandledRejection", (reason) => {
     const msg = reason?.message ?? String(reason);
     if (esErrorPuppeteer(msg)) {
-        console.error("⚠️ Error de Puppeteer (rechazo no manejado):", msg.slice(0, 80));
+        console.error("⚠️ Error de Puppeteer:", msg.slice(0, 80));
+        if (msg.includes("auth timeout")) reintentar();
         return;
     }
     console.error("Unhandled rejection:", reason);
