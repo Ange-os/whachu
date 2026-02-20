@@ -15,7 +15,7 @@ const REINIT_DELAY_AFTER_FAIL_MS = 45000; // 45 s si el último reintento falló
 
 // --- CLIENTE WHATSAPP ---
 // En VPS la carga puede ser lenta: más tiempo para que cargue la página y aparezca el QR
-const AUTH_TIMEOUT_MS = 120000; // 2 minutos
+const AUTH_TIMEOUT_MS = 300000; // 5 minutos (VPS/carga lenta)
 
 const client = new Client({
     authStrategy: new LocalAuth(),
