@@ -51,6 +51,34 @@ client.on("disconnected", (reason) => {
     clientReady = false;
 });
 
+// Evitar que errores de Puppeteer/whatsapp-web.js tiren el proceso
+function esErrorPuppeteer(msg) {
+    return (
+        msg.includes("Protocol error (Network.getResponseBody)") ||
+        msg.includes("No data found for resource") ||
+        msg.includes("Execution context was destroyed") ||
+        msg.includes("ProtocolError")
+    );
+}
+
+process.on("uncaughtException", (err) => {
+    const msg = err?.message || String(err);
+    if (esErrorPuppeteer(msg)) {
+        console.error("⚠️ Error de Puppeteer (el cliente puede seguir en uso):", msg.slice(0, 80));
+        return;
+    }
+    throw err;
+});
+
+process.on("unhandledRejection", (reason) => {
+    const msg = reason?.message ?? String(reason);
+    if (esErrorPuppeteer(msg)) {
+        console.error("⚠️ Error de Puppeteer (rechazo no manejado):", msg.slice(0, 80));
+        return;
+    }
+    console.error("Unhandled rejection:", reason);
+});
+
 client.initialize();
 
 // --- API ENDPOINTS ---
