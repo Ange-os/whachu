@@ -12,8 +12,12 @@ let isReinitializing = false;
 const REINIT_DELAY_MS = 8000;
 
 // --- CLIENTE WHATSAPP ---
+// En VPS la carga puede ser lenta: más tiempo para que cargue la página y aparezca el QR
+const AUTH_TIMEOUT_MS = 120000; // 2 minutos
+
 const client = new Client({
     authStrategy: new LocalAuth(),
+    authTimeoutMs: AUTH_TIMEOUT_MS,
     puppeteer: {
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
         headless: true,
@@ -72,6 +76,11 @@ process.on("unhandledRejection", (reason) => {
         msg.includes("ProtocolError")
     ) {
         console.error("⚠️ Rechazo no manejado de Puppeteer/WhatsApp (se reintentará):", msg.slice(0, 120));
+        scheduleReinit();
+        return;
+    }
+    if (msg.includes("auth timeout")) {
+        console.error("⚠️ Timeout de autenticación (la página tardó en cargar). Reintentando en", REINIT_DELAY_MS / 1000, "s...");
         scheduleReinit();
         return;
     }
