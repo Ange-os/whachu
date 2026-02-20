@@ -9,7 +9,9 @@ app.use(express.json());
 
 let clientReady = false;
 let isReinitializing = false;
-const REINIT_DELAY_MS = 8000;
+let reinitTimeoutId = null;
+const REINIT_DELAY_MS = 18000;        // 18 s para que el navegador cierre bien
+const REINIT_DELAY_AFTER_FAIL_MS = 45000; // 45 s si el último reintento falló
 
 // --- CLIENTE WHATSAPP ---
 // En VPS la carga puede ser lenta: más tiempo para que cargue la página y aparezca el QR
@@ -27,30 +29,40 @@ const client = new Client({
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--disable-software-rasterizer",
-            "--single-process",
             "--no-zygote",
             "--disable-extensions",
         ],
     },
 });
 
+let lastReinitFailed = false;
+
 function scheduleReinit() {
     if (isReinitializing) return;
     isReinitializing = true;
     clientReady = false;
-    console.log("⏳ Reintentando inicializar cliente en", REINIT_DELAY_MS / 1000, "segundos...");
-    setTimeout(async () => {
+    const delay = lastReinitFailed ? REINIT_DELAY_AFTER_FAIL_MS : REINIT_DELAY_MS;
+    console.log("⏳ Reintentando inicializar cliente en", delay / 1000, "segundos...");
+    if (reinitTimeoutId) clearTimeout(reinitTimeoutId);
+    reinitTimeoutId = setTimeout(async () => {
+        reinitTimeoutId = null;
         try {
             try {
-                await client.destroy();
+                await Promise.race([
+                    client.destroy(),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error("destroy timeout")), 10000)),
+                ]);
             } catch (_) {}
             await client.initialize();
+            lastReinitFailed = false;
         } catch (err) {
-            console.error("Error al reinicializar:", err.message);
+            lastReinitFailed = true;
+            const errMsg = err != null ? (err?.message ?? String(err)) : "error desconocido";
+            console.error("Error al reinicializar:", errMsg);
         } finally {
             isReinitializing = false;
         }
-    }, REINIT_DELAY_MS);
+    }, delay);
 }
 
 // Errores de Puppeteer/whatsapp-web.js que no deben tumbar el proceso
