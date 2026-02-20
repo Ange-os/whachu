@@ -4,8 +4,11 @@ services:
     build: .
     container_name: weapi
     ports:
-      - "8081:3000"   # host:container, usa 8081 porque 3000 ya está ocupado
+      - "8081:3000"
     restart: always
-    volumes:
-      - ./session:/usr/src/app/session
+    # Sin volumen session: la sesión vive solo dentro del contenedor.
+    # Para borrar todo: recrea el contenedor (Stop + Start o Redeploy).
+    # Si quieres persistir sesión, descomenta:
+    # volumes:
+    #   - ./session:/usr/src/app/session
 

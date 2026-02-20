@@ -1,30 +1,17 @@
 import express from "express";
-import fs from "fs/promises";
-import path from "path";
-import qrcode from "qrcode";
 import pkg from "whatsapp-web.js";
 import qrcodeTerminal from "qrcode-terminal";
 
 const { Client, LocalAuth } = pkg;
 
-let lastQrDataUrl = null;
-
 const app = express();
 app.use(express.json());
 
 let clientReady = false;
-let isReinitializing = false;
-let reinitTimeoutId = null;
-const REINIT_DELAY_MS = 18000;        // 18 s para que el navegador cierre bien
-const REINIT_DELAY_AFTER_FAIL_MS = 45000; // 45 s si el último reintento falló
-
-// --- CLIENTE WHATSAPP ---
-// En VPS la carga puede ser lenta: más tiempo para que cargue la página y aparezca el QR
-const AUTH_TIMEOUT_MS = 300000; // 5 minutos (VPS/carga lenta)
 
 const client = new Client({
     authStrategy: new LocalAuth(),
-    authTimeoutMs: AUTH_TIMEOUT_MS,
+    authTimeoutMs: 300000,
     puppeteer: {
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
         headless: true,
@@ -33,292 +20,59 @@ const client = new Client({
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
-            "--disable-software-rasterizer",
-            "--no-zygote",
-            "--disable-extensions",
         ],
     },
 });
 
-let lastReinitFailed = false;
-
-function scheduleReinit(overrideDelayMs) {
-    if (isReinitializing) return;
-    isReinitializing = true;
-    clientReady = false;
-    const delay = overrideDelayMs ?? (lastReinitFailed ? REINIT_DELAY_AFTER_FAIL_MS : REINIT_DELAY_MS);
-    console.log("⏳ Reintentando inicializar cliente en", delay / 1000, "segundos...");
-    if (reinitTimeoutId) clearTimeout(reinitTimeoutId);
-    reinitTimeoutId = setTimeout(async () => {
-        reinitTimeoutId = null;
-        try {
-            try {
-                await Promise.race([
-                    client.destroy(),
-                    new Promise((_, rej) => setTimeout(() => rej(new Error("destroy timeout")), 10000)),
-                ]);
-            } catch (_) {}
-            await client.initialize();
-            lastReinitFailed = false;
-        } catch (err) {
-            lastReinitFailed = true;
-            const errMsg = err != null ? (err?.message ?? String(err)) : "error desconocido";
-            console.error("Error al reinicializar:", errMsg);
-        } finally {
-            isReinitializing = false;
-        }
-    }, delay);
-}
-
-function isPuppeteerRecoverableError(msg) {
-    return (
-        msg.includes("Execution context was destroyed") ||
-        msg.includes("Protocol error (Network.getResponseBody)") ||
-        msg.includes("ProtocolError") ||
-        msg.includes("Attempted to use detached Frame") ||
-        msg.includes("detached Frame")
-    );
-}
-
-// Errores de Puppeteer/whatsapp-web.js que no deben tumbar el proceso
-process.on("uncaughtException", (err) => {
-    const msg = err?.message || String(err);
-    if (isPuppeteerRecoverableError(msg)) {
-        console.error("⚠️ Error interno de Puppeteer/WhatsApp (se reintentará):", msg.slice(0, 120));
-        scheduleReinit();
-        return;
-    }
-    console.error("Uncaught exception:", err);
-});
-
-process.on("unhandledRejection", (reason) => {
-    const msg = reason?.message || String(reason);
-    if (isPuppeteerRecoverableError(msg)) {
-        console.error("⚠️ Rechazo no manejado de Puppeteer/WhatsApp (se reintentará):", msg.slice(0, 120));
-        scheduleReinit();
-        return;
-    }
-    if (msg.includes("auth timeout")) {
-        console.error("⚠️ Timeout de autenticación (la página tardó en cargar). Reintentando en", REINIT_DELAY_MS / 1000, "s...");
-        scheduleReinit();
-        return;
-    }
-    console.error("Unhandled rejection:", reason);
-});
-
-// EVENTOS DEL CLIENTE
-client.on("qr", async (qr) => {
-    console.log("QR recibido, escanea para iniciar sesión (o abre GET /qr en el navegador):");
+client.on("qr", (qr) => {
+    console.log("Escanea el QR con WhatsApp (Enlazar dispositivo):");
     qrcodeTerminal.generate(qr, { small: true });
-    try {
-        lastQrDataUrl = await qrcode.toDataURL(qr, { width: 400, margin: 2 });
-    } catch (_) {
-        lastQrDataUrl = null;
-    }
 });
 
 client.on("ready", () => {
     clientReady = true;
-    lastQrDataUrl = null;
-    console.log("✅ WhatsApp listo!");
+    console.log("WhatsApp listo.");
 });
 
 client.on("authenticated", () => {
-    console.log("🔑 Autenticado correctamente.");
+    console.log("Autenticado.");
 });
 
 client.on("auth_failure", () => {
-    console.log("❌ Falla de autenticación.");
+    console.log("Falla de autenticación.");
 });
 
 client.on("disconnected", (reason) => {
-    console.log("❌ Cliente desconectado:", reason);
     clientReady = false;
-    scheduleReinit();
+    console.log("Desconectado:", reason);
 });
 
 client.initialize();
 
-// --- API ENDPOINTS ---
-
-const HTML_HEAD = "<html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body style=\"font-family:sans-serif;text-align:center;padding:2rem\">";
-const HTML_FOOT = "</body></html>";
-
-// Ver el QR en el navegador (útil cuando no ves la consola, ej. en Portainer)
-app.get("/qr", (req, res) => {
-    if (!lastQrDataUrl) {
-        return res.type("html").status(200).send(
-            HTML_HEAD +
-            "<h1>No hay QR todavía</h1>" +
-            "<p>1. Primero <strong><a href='/session/clear'>borra la sesión</a></strong> (botón en esa página).</p>" +
-            "<p>2. Espera 1–2 minutos a que se genere el QR.</p>" +
-            "<p>3. Recarga esta página o <a href='/qr'>clic aquí</a>.</p>" +
-            "<p><a href='/session/clear'>Ir a borrar sesión</a> | <a href='/qr'>Recargar QR</a></p>" +
-            HTML_FOOT
-        );
-    }
-    res.type("html").send(
-        HTML_HEAD +
-        "<h1>Escanear WhatsApp</h1>" +
-        "<p>Escanea con tu teléfono (WhatsApp → Enlazar dispositivo)</p>" +
-        `<img src="${lastQrDataUrl}" alt="QR" style="max-width:100%"/>` +
-        "<p><a href=\"/qr\">Actualizar QR</a></p>" +
-        HTML_FOOT
-    );
-});
-
-// Página para borrar sesión (GET = ver formulario; así no da "Cannot GET /session/clear")
-app.get("/session/clear", (req, res) => {
-    res.type("html").send(
-        HTML_HEAD +
-        "<h1>Borrar sesión de WhatsApp</h1>" +
-        "<p>Esto cerrará la sesión actual y hará que se genere un nuevo QR para escanear.</p>" +
-        "<form method=\"POST\" action=\"/session/clear\">" +
-        "<button type=\"submit\">Borrar sesión y generar nuevo QR</button>" +
-        "</form>" +
-        "<p><a href=\"/qr\">Ver QR</a></p>" +
-        HTML_FOOT
-    );
-});
-
-// Borrar carpeta con reintentos (evita EBUSY cuando el proceso aún tiene archivos abiertos)
-async function rmDirWithRetry(dirPath, maxRetries = 4) {
-    for (let i = 0; i < maxRetries; i++) {
-        try {
-            await fs.rm(dirPath, { recursive: true, force: true });
-            console.log("Borrada carpeta de sesión:", dirPath);
-            return;
-        } catch (e) {
-            if (e?.code === "ENOENT") return;
-            if (e?.code === "EBUSY" && i < maxRetries - 1) {
-                await new Promise((r) => setTimeout(r, 2000 + i * 2000));
-                continue;
-            }
-            console.error("Error borrando", dirPath, e?.message);
-        }
-    }
-}
-
-// Borrar sesión y forzar nuevo QR (POST desde el formulario o desde API)
-app.post("/session/clear", async (req, res) => {
-    const baseDir = process.cwd();
-    const dirsToRemove = [
-        path.join(baseDir, "session"),
-        path.join(baseDir, ".wwebjs_auth"),
-    ];
-    const wantsHtml = req.headers.accept && req.headers.accept.includes("text/html");
-    const sendOk = (extra) => {
-        if (wantsHtml) {
-            res.type("html").send(
-                HTML_HEAD +
-                "<h1>Sesión borrada</h1>" +
-                "<p>Espera 1–2 minutos a que se genere el QR y luego abre el enlace:</p>" +
-                "<p><strong><a href=\"/qr\">Ver QR para escanear</a></strong></p>" +
-                (extra ? "<p>" + extra + "</p>" : "") +
-                HTML_FOOT
-            );
-        } else {
-            res.json({ ok: true, message: "Sesión borrada. Abre GET /qr para escanear de nuevo." });
-        }
-    };
-
-    if (isReinitializing) {
-        if (wantsHtml) {
-            return res.type("html").status(409).send(
-                HTML_HEAD + "<h1>Espera</h1><p>Ya hay un reinicio en curso. Espera 1 minuto y vuelve a intentar.</p><p><a href=\"/session/clear\">Volver</a></p>" + HTML_FOOT
-            );
-        }
-        return res.status(409).json({ error: "Reinicio en curso; intenta en 1 minuto." });
-    }
-
-    isReinitializing = true;
-    clientReady = false;
-    lastQrDataUrl = null;
-    if (reinitTimeoutId) {
-        clearTimeout(reinitTimeoutId);
-        reinitTimeoutId = null;
-    }
-
-    try {
-        try {
-            await Promise.race([
-                client.destroy(),
-                new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 12000)),
-            ]);
-        } catch (_) {}
-        // Dar tiempo a que el proceso suelte los archivos de session
-        await new Promise((r) => setTimeout(r, 4000));
-        for (const dir of dirsToRemove) {
-            await rmDirWithRetry(dir);
-        }
-        // No llamar initialize() aquí: el frame puede seguir "detached". Programar reinicio en 8 s.
-        isReinitializing = false;
-        scheduleReinit(8000);
-        sendOk();
-    } catch (err) {
-        console.error("Error en session/clear:", err?.message || err);
-        isReinitializing = false;
-        scheduleReinit();
-        sendOk("Si no ves el QR en 1–2 min, <strong>reinicia el contenedor</strong> desde Portainer. Se va a reintentar en segundo plano.");
-    }
-});
-
-// Si el error indica que la sesión/página se destruyó, marcar no listo y no llamar más al cliente
-function isContextDestroyedError(err) {
-    const msg = err?.message || String(err);
-    return (
-        msg.includes("Execution context was destroyed") ||
-        msg.includes("Protocol error (Runtime.callFunctionOn)")
-    );
-}
-
-// ENVIAR MENSAJE
 app.post("/send", async (req, res) => {
     try {
         if (!clientReady) {
-            return res.status(400).json({ error: "WhatsApp no está listo todavía." });
+            return res.status(400).json({ error: "WhatsApp no está listo." });
         }
-
         const { to, message } = req.body;
         if (!to || !message) {
-            return res.status(400).json({ error: "Faltan parámetros: to, message" });
+            return res.status(400).json({ error: "Faltan: to, message" });
         }
-
         const chatId = to.includes("@c.us") ? to : `${to}@c.us`;
-
-        // Validar que el número esté registrado
         const isRegistered = await client.isRegisteredUser(chatId);
         if (!isRegistered) {
             return res.status(400).json({ error: "Número no registrado en WhatsApp" });
         }
-
-        // Enviar mensaje sin marcar como leído
         await client.sendMessage(chatId, message, { sendSeen: false });
-
-        console.log(`Mensaje enviado a ${chatId}: ${message}`);
+        console.log("Enviado a", chatId);
         res.json({ status: "sent", to: chatId });
     } catch (err) {
-        const contextDestroyed = isContextDestroyedError(err);
-        if (contextDestroyed) {
-            clientReady = false;
-            console.error("Error enviando mensaje (sesión/página invalidada):", err?.message || err);
-            scheduleReinit();
-            return res.status(503).json({
-                error: "Cliente desconectado o sesión no disponible. Se está reconectando; reintenta en unos segundos.",
-            });
-        }
-        console.error("Error enviando mensaje:", err);
-        try {
-            console.log("Estado actual:", await client.getState());
-        } catch (stateErr) {
-            console.error("No se pudo obtener el estado del cliente:", stateErr);
-        }
+        console.error("Error enviando:", err?.message || err);
         res.status(500).json({ error: "Error enviando mensaje." });
     }
 });
 
-// API EN PUERTO 3000
 const PORT = 3000;
 app.listen(PORT, () => {
-    console.log("API lista en puerto " + PORT);
+    console.log("API en puerto", PORT);
 });
