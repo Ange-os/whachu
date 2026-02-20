@@ -64,19 +64,30 @@ function reintentar() {
     }, 15000);
 }
 
+function esErrorReintentable(msg) {
+    return (
+        msg.includes("auth timeout") ||
+        msg.includes("Protocol error (Network.getResponseBody)") ||
+        msg.includes("No data found for resource") ||
+        msg.includes("Execution context was destroyed") ||
+        msg.includes("detached Frame")
+    );
+}
+
 process.on("unhandledRejection", (reason) => {
     const msg = reason?.message ?? String(reason);
-    console.error("Error no capturado:", msg);
-    if (msg.includes("auth timeout")) {
-        console.log("La página tardó en cargar. Se reintentará.");
+    console.error("Error no capturado:", msg.slice(0, 100));
+    if (esErrorReintentable(msg)) {
+        console.log("Se reintentará en 15 s...");
         reintentar();
     }
 });
 
 console.log("Conectando a WhatsApp Web, espera el QR (puede tardar 1-2 min)...");
 client.initialize().catch((err) => {
-    console.error("Error al iniciar WhatsApp:", err?.message || err);
-    if (String(err?.message || err).includes("auth timeout")) reintentar();
+    const msg = String(err?.message || err);
+    console.error("Error al iniciar WhatsApp:", msg.slice(0, 100));
+    if (esErrorReintentable(msg)) reintentar();
 });
 
 app.post("/send", async (req, res) => {
