@@ -11,7 +11,7 @@ let clientReady = false;
 
 const client = new Client({
     authStrategy: new LocalAuth(),
-    authTimeoutMs: 600000,
+    authTimeoutMs: 900000,
     puppeteer: {
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
         headless: true,
@@ -20,6 +20,14 @@ const client = new Client({
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--disable-extensions",
+            "--no-first-run",
+            "--disable-background-networking",
+            "--disable-sync",
+            "--disable-default-apps",
+            "--mute-audio",
+            "--no-default-browser-check",
         ],
     },
 });
@@ -51,17 +59,19 @@ let reconectando = false;
 function reintentar() {
     if (reconectando) return;
     reconectando = true;
-    console.log("Reintentando en 15 s...");
+    const seg = 30;
+    console.log("Reintentando en", seg, "s...");
     setTimeout(async () => {
         try {
             await client.destroy().catch(() => {});
+            await new Promise((r) => setTimeout(r, 5000));
             await client.initialize();
         } catch (e) {
             console.error("Reintento falló:", e?.message || e);
         } finally {
             reconectando = false;
         }
-    }, 15000);
+    }, seg * 1000);
 }
 
 function esErrorReintentable(msg) {
