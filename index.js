@@ -139,19 +139,47 @@ client.initialize();
 
 // --- API ENDPOINTS ---
 
+const HTML_HEAD = "<html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body style=\"font-family:sans-serif;text-align:center;padding:2rem\">";
+const HTML_FOOT = "</body></html>";
+
 // Ver el QR en el navegador (útil cuando no ves la consola, ej. en Portainer)
 app.get("/qr", (req, res) => {
     if (!lastQrDataUrl) {
-        return res.status(404).send(
-            "<html><body><p>No hay QR disponible. Espera a que la app genere uno (puede tardar 1–2 min) y recarga esta página.</p><p><a href='/qr'>Recargar</a></p></body></html>"
+        return res.type("html").status(200).send(
+            HTML_HEAD +
+            "<h1>No hay QR todavía</h1>" +
+            "<p>1. Primero <strong><a href='/session/clear'>borra la sesión</a></strong> (botón en esa página).</p>" +
+            "<p>2. Espera 1–2 minutos a que se genere el QR.</p>" +
+            "<p>3. Recarga esta página o <a href='/qr'>clic aquí</a>.</p>" +
+            "<p><a href='/session/clear'>Ir a borrar sesión</a> | <a href='/qr'>Recargar QR</a></p>" +
+            HTML_FOOT
         );
     }
     res.type("html").send(
-        `<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="font-family:sans-serif;text-align:center;padding:2rem"><h1>Escanear WhatsApp</h1><p>Escanea con tu teléfono (WhatsApp → Enlazar dispositivo)</p><img src="${lastQrDataUrl}" alt="QR" style="max-width:100%"/><p><a href="/qr">Actualizar QR</a></p></body></html>`
+        HTML_HEAD +
+        "<h1>Escanear WhatsApp</h1>" +
+        "<p>Escanea con tu teléfono (WhatsApp → Enlazar dispositivo)</p>" +
+        `<img src="${lastQrDataUrl}" alt="QR" style="max-width:100%"/>` +
+        "<p><a href=\"/qr\">Actualizar QR</a></p>" +
+        HTML_FOOT
     );
 });
 
-// Borrar sesión y forzar nuevo QR (sin entrar al contenedor)
+// Página para borrar sesión (GET = ver formulario; así no da "Cannot GET /session/clear")
+app.get("/session/clear", (req, res) => {
+    res.type("html").send(
+        HTML_HEAD +
+        "<h1>Borrar sesión de WhatsApp</h1>" +
+        "<p>Esto cerrará la sesión actual y hará que se genere un nuevo QR para escanear.</p>" +
+        "<form method=\"POST\" action=\"/session/clear\">" +
+        "<button type=\"submit\">Borrar sesión y generar nuevo QR</button>" +
+        "</form>" +
+        "<p><a href=\"/qr\">Ver QR</a></p>" +
+        HTML_FOOT
+    );
+});
+
+// Borrar sesión y forzar nuevo QR (POST desde el formulario o desde API)
 app.post("/session/clear", async (req, res) => {
     const baseDir = process.cwd();
     const dirsToRemove = [
@@ -181,10 +209,29 @@ app.post("/session/clear", async (req, res) => {
             }
         }
         await client.initialize();
-        res.json({ ok: true, message: "Sesión borrada. Abre GET /qr para escanear de nuevo." });
+        const wantsHtml = req.headers.accept && req.headers.accept.includes("text/html");
+        if (wantsHtml) {
+            res.type("html").send(
+                HTML_HEAD +
+                "<h1>Sesión borrada</h1>" +
+                "<p>Espera 1–2 minutos a que se genere el QR y luego abre el enlace:</p>" +
+                "<p><strong><a href=\"/qr\">Ver QR para escanear</a></strong></p>" +
+                "<p><a href=\"/qr\">/qr</a></p>" +
+                HTML_FOOT
+            );
+        } else {
+            res.json({ ok: true, message: "Sesión borrada. Abre GET /qr para escanear de nuevo." });
+        }
     } catch (err) {
         console.error("Error en session/clear:", err?.message || err);
-        res.status(500).json({ error: "Error borrando sesión.", detail: err?.message });
+        const wantsHtml = req.headers.accept && req.headers.accept.includes("text/html");
+        if (wantsHtml) {
+            res.type("html").status(500).send(
+                HTML_HEAD + "<h1>Error</h1><p>" + (err?.message || err) + "</p><p><a href=\"/session/clear\">Volver</a></p>" + HTML_FOOT
+            );
+        } else {
+            res.status(500).json({ error: "Error borrando sesión.", detail: err?.message });
+        }
     }
 });
 
