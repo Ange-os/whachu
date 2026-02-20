@@ -1,129 +1,110 @@
 import express from "express";
 import pkg from "whatsapp-web.js";
-import qrcodeTerminal from "qrcode-terminal";
+import qrcode from "qrcode";
+import fs from "fs";
 
 const { Client, LocalAuth } = pkg;
 
 const app = express();
 app.use(express.json());
 
+let qrCodeData = null;
 let clientReady = false;
 
+// --- CLIENTE WHATSAPP ---
 const client = new Client({
     authStrategy: new LocalAuth(),
-    authTimeoutMs: 900000,
     puppeteer: {
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
         headless: true,
         args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--disable-software-rasterizer",
-            "--disable-extensions",
-            "--no-first-run",
-            "--disable-background-networking",
-            "--disable-sync",
-            "--disable-default-apps",
-            "--mute-audio",
-            "--no-default-browser-check",
         ],
     },
 });
 
+// LOGS
 client.on("qr", (qr) => {
-    console.log("Escanea el QR con WhatsApp (Enlazar dispositivo):");
-    qrcodeTerminal.generate(qr, { small: true });
+    console.log("QR recibido, escanea para iniciar sesión.");
+    qrcode.toDataURL(qr, (err, url) => {
+        qrCodeData = url;
+    });
 });
 
 client.on("ready", () => {
     clientReady = true;
-    console.log("WhatsApp listo.");
+    qrCodeData = null;
+    console.log("WhatsApp listo!");
 });
 
 client.on("authenticated", () => {
-    console.log("Autenticado.");
+    console.log("Autenticado correctamente.");
 });
 
 client.on("auth_failure", () => {
-    console.log("Falla de autenticación.");
+    console.log("❌ Falla de autenticación.");
 });
 
 client.on("disconnected", (reason) => {
+    console.log("❌ Cliente desconectado:", reason);
     clientReady = false;
-    console.log("Desconectado:", reason);
 });
 
-let reconectando = false;
-function reintentar() {
-    if (reconectando) return;
-    reconectando = true;
-    const seg = 30;
-    console.log("Reintentando en", seg, "s...");
-    setTimeout(async () => {
-        try {
-            await client.destroy().catch(() => {});
-            await new Promise((r) => setTimeout(r, 5000));
-            await client.initialize();
-        } catch (e) {
-            console.error("Reintento falló:", e?.message || e);
-        } finally {
-            reconectando = false;
-        }
-    }, seg * 1000);
-}
+client.initialize();
 
-function esErrorReintentable(msg) {
-    return (
-        msg.includes("auth timeout") ||
-        msg.includes("Protocol error (Network.getResponseBody)") ||
-        msg.includes("No data found for resource") ||
-        msg.includes("Execution context was destroyed") ||
-        msg.includes("detached Frame")
-    );
-}
+// --- API ENDPOINTS ---
 
-process.on("unhandledRejection", (reason) => {
-    const msg = reason?.message ?? String(reason);
-    console.error("Error no capturado:", msg.slice(0, 100));
-    if (esErrorReintentable(msg)) {
-        console.log("Se reintentará en 15 s...");
-        reintentar();
+// GET QR COMO PNG
+app.get("/qr.png", (req, res) => {
+    if (!qrCodeData) {
+        return res.status(503).send("QR no disponible aún.");
     }
+
+    const img = Buffer.from(qrCodeData.split(",")[1], "base64");
+    res.writeHead(200, {
+        "Content-Type": "image/png",
+        "Content-Length": img.length,
+    });
+    res.end(img);
 });
 
-console.log("Conectando a WhatsApp Web, espera el QR (puede tardar 1-2 min)...");
-client.initialize().catch((err) => {
-    const msg = String(err?.message || err);
-    console.error("Error al iniciar WhatsApp:", msg.slice(0, 100));
-    if (esErrorReintentable(msg)) reintentar();
+// ESTADO DEL SERVICIO
+app.get("/status", (req, res) => {
+    res.json({
+        whatsapp: clientReady ? "ready" : "pending",
+        qr_available: qrCodeData ? true : false,
+    });
 });
 
+// ENVIAR MENSAJE
 app.post("/send", async (req, res) => {
     try {
         if (!clientReady) {
-            return res.status(400).json({ error: "WhatsApp no está listo." });
+            return res.status(400).json({ error: "WhatsApp no está listo todavía." });
         }
+
         const { to, message } = req.body;
+
         if (!to || !message) {
-            return res.status(400).json({ error: "Faltan: to, message" });
+            return res.status(400).json({ error: "Faltan parámetros: to, message" });
         }
+
         const chatId = to.includes("@c.us") ? to : `${to}@c.us`;
-        const isRegistered = await client.isRegisteredUser(chatId);
-        if (!isRegistered) {
-            return res.status(400).json({ error: "Número no registrado en WhatsApp" });
-        }
-        await client.sendMessage(chatId, message, { sendSeen: false });
-        console.log("Enviado a", chatId);
+
+        await client.sendMessage(chatId, message);
+
+        console.log(`Mensaje enviado a ${chatId}: ${message}`);
+
         res.json({ status: "sent", to: chatId });
     } catch (err) {
-        console.error("Error enviando:", err?.message || err);
+        console.error("Error enviando mensaje:", err);
         res.status(500).json({ error: "Error enviando mensaje." });
     }
 });
 
+// API EN PUERTO (configurable con PORT)
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, () => {
-    console.log("API en puerto", PORT);
+    console.log("API lista en puerto " + PORT);
 });
